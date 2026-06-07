@@ -1,0 +1,12 @@
+discord.py[voice]>=2.5
+yandex-music
+python-dotenv
+PyNaCl
+ 
+# Telegram-управление (/play и т.д. из Telegram). Опционально.
+aiogram>=3.0
+ 
+# Для голосового прослушивания (/listen). Сейчас не работает из-за DAVE-шифрования Discord (2026 год).
+discord-ext-voice-recv
+vosk
+numpy
