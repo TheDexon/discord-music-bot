@@ -63,19 +63,89 @@ def _resolve_meta_sync(query):
 
 
 def _resolve_url_sync(track_dict):
-    """Синхронно: свежая прямая ссылка на поток для воспроизведения."""
+    """Синхронно: (ссылка на поток, длительность в секундах) или None."""
     track = _resolve_for_play(track_dict)
     if track is None:
         return None
     try:
-        return _get_stream_url(track)
+        url = _get_stream_url(track)
     except Exception as e:
         print(f"[stream-url] {e}")
         return None
+    ms = getattr(track, "duration_ms", None) or 0
+    duration = int(ms / 1000)
+    return url, duration
 
 
 async def resolve_meta(query):
     return await asyncio.to_thread(_resolve_meta_sync, query)
+
+
+def _search_top_sync(query, limit=5):
+    """Возвращает топ N результатов поиска (список с title, artist, track_id)."""
+    search = ym().search(query)
+    if not search.tracks or not search.tracks.results:
+        return []
+
+    results = []
+    for track in search.tracks.results[:limit]:
+        results.append({
+            "title": track.title,
+            "artist": ", ".join(a.name for a in track.artists),
+            "track_id": str(track.id),
+            "query": f"https://music.yandex.ru/track/{track.id}",
+        })
+    return results
+
+
+def _resolve_playlist_sync(url_or_kind_id):
+    """Парсит плейлист по ссылке или kind:id (e.g. '3:playlist_id').
+    Возвращает список треков или None."""
+    import re
+
+    m = re.search(r"/playlist/([^/?]+)", url_or_kind_id or "")
+    playlist_id = None
+    user_id = None
+
+    if m:
+        playlist_id = m.group(1)
+    elif ":" in url_or_kind_id:
+        user_id, playlist_id = url_or_kind_id.split(":", 1)
+
+    if not playlist_id:
+        return None
+
+    try:
+        if user_id:
+            playlist = ym().users_playlists(int(user_id), int(playlist_id))
+        else:
+            playlist = ym().playlists_list([playlist_id])[0]
+    except Exception as e:
+        print(f"[playlist-parse] {e}")
+        return None
+
+    if not playlist or not playlist.tracks:
+        return None
+
+    results = []
+    for t in playlist.tracks:
+        if t.track:
+            track = t.track
+            results.append({
+                "title": track.title,
+                "artist": ", ".join(a.name for a in track.artists),
+                "track_id": str(track.id),
+                "query": f"https://music.yandex.ru/track/{track.id}",
+            })
+    return results
+
+
+async def search_top(query, limit=5):
+    return await asyncio.to_thread(_search_top_sync, query, limit)
+
+
+async def resolve_playlist(url_or_kind_id):
+    return await asyncio.to_thread(_resolve_playlist_sync, url_or_kind_id)
 
 
 async def resolve_url(track_dict):

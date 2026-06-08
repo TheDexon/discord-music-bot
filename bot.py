@@ -1,6 +1,7 @@
 import asyncio
 
 import discord
+from discord import app_commands
 
 import config
 import voice_listen
@@ -16,8 +17,10 @@ from core import (
     connect_voice,
     play_next,
     kick_for_voice,
+    mark_paused,
+    mark_resumed,
 )
-from sources import resolve_meta
+from sources import resolve_meta, search_top, resolve_playlist
 from player import (
     get_queue,
     clear_queue,
@@ -27,6 +30,7 @@ from player import (
     remove_track as queue_remove_track,
     move_track,
     set_volume,
+    get_volume,
     get_now_playing,
     set_now_playing,
 )
@@ -39,6 +43,139 @@ from playlists import (
     remove_track as playlist_remove_track,
     rename_playlist,
 )
+
+
+# ----------------------------------------------------------------------------
+# Интерактивные элементы (Select результаты поиска, Пульт трека)
+# ----------------------------------------------------------------------------
+
+class SearchResultsView(discord.ui.View):
+    def __init__(self, results, guild_id, channel, vc):
+        super().__init__(timeout=60)
+        self.results = results
+        self.guild_id = guild_id
+        self.channel = channel
+        self.vc = vc
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+    @discord.ui.button(label="1", style=discord.ButtonStyle.primary)
+    async def select_1(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.select_track(interaction, 0)
+
+    @discord.ui.button(label="2", style=discord.ButtonStyle.primary)
+    async def select_2(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.select_track(interaction, 1)
+
+    @discord.ui.button(label="3", style=discord.ButtonStyle.primary)
+    async def select_3(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.select_track(interaction, 2)
+
+    @discord.ui.button(label="4", style=discord.ButtonStyle.primary)
+    async def select_4(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.select_track(interaction, 3)
+
+    @discord.ui.button(label="5", style=discord.ButtonStyle.primary)
+    async def select_5(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.select_track(interaction, 4)
+
+    async def select_track(self, interaction: discord.Interaction, index: int):
+        if index >= len(self.results):
+            await interaction.response.defer()
+            return
+
+        meta = self.results[index]
+        add_to_queue(self.guild_id, meta["title"], meta["artist"], meta["query"], meta["track_id"])
+
+        if self.vc.is_playing() or self.vc.is_paused():
+            position = len(get_queue(self.guild_id))
+            await interaction.response.send_message(embed=embed(
+                "➕ Добавлено в очередь",
+                f"**{meta['title']}**\n{meta['artist']}\nПозиция: {position}",
+            ))
+        else:
+            await interaction.response.defer()
+            await play_next(interaction.guild, announce=False)
+            np = get_now_playing(self.guild_id)
+            await self.channel.send(embed=now_playing_embed(np if np else meta))
+
+        for item in self.children:
+            item.disabled = True
+        await interaction.message.edit(view=self)
+
+
+class TrackControlsView(discord.ui.View):
+    def __init__(self, guild):
+        super().__init__(timeout=None)
+        self.guild = guild
+
+    @discord.ui.button(label="⏭ Skip", style=discord.ButtonStyle.danger)
+    async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = self.guild.voice_client
+        if vc and (vc.is_playing() or vc.is_paused()):
+            skip_requested[self.guild.id] = True
+            vc.stop()
+            await interaction.response.defer()
+        else:
+            await interaction.response.send_message("Ничего не играет.", ephemeral=True)
+
+    @discord.ui.button(label="⏸ Pause", style=discord.ButtonStyle.primary)
+    async def pause_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = self.guild.voice_client
+        if vc and vc.is_playing():
+            vc.pause()
+            mark_paused(self.guild.id)
+            await interaction.response.defer()
+        else:
+            await interaction.response.send_message("Ничего не играет.", ephemeral=True)
+
+    @discord.ui.button(label="▶ Resume", style=discord.ButtonStyle.success)
+    async def resume_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = self.guild.voice_client
+        if vc and vc.is_paused():
+            vc.resume()
+            mark_resumed(self.guild.id)
+            await interaction.response.defer()
+        else:
+            await interaction.response.send_message("Не на паузе.", ephemeral=True)
+
+    @discord.ui.button(label="🔊 Volume", style=discord.ButtonStyle.primary)
+    async def volume_modal(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = VolumeModal(self.guild)
+        await interaction.response.send_modal(modal)
+
+
+class VolumeModal(discord.ui.Modal, title="Установить громкость"):
+    volume_input = discord.ui.TextInput(
+        label="Громкость (0-200)",
+        placeholder="100",
+        min_length=1,
+        max_length=3,
+    )
+
+    def __init__(self, guild):
+        super().__init__()
+        self.guild = guild
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            value = int(self.volume_input.value)
+            if value < 0 or value > 200:
+                await interaction.response.send_message("Укажи 0-200.", ephemeral=True)
+                return
+
+            level = value / 100
+            set_volume(self.guild.id, level)
+
+            vc = self.guild.voice_client
+            if vc and vc.source and isinstance(vc.source, discord.PCMVolumeTransformer):
+                vc.source.volume = level
+
+            await interaction.response.send_message(f"🔊 Громкость: {value}%", ephemeral=True)
+        except ValueError:
+            await interaction.response.send_message("Неверное значение.", ephemeral=True)
 
 
 # ----------------------------------------------------------------------------
@@ -230,25 +367,41 @@ async def play(interaction: discord.Interaction, query: str):
     if vc is None:
         vc = await connect_voice(interaction.user.voice.channel)
 
-    meta = await resolve_meta(query)
-    if meta is None:
-        await interaction.followup.send("Ничего не найдено.")
-        return
-
-    add_to_queue(gid, meta["title"], meta["artist"], meta["query"], meta["track_id"])
-
-    if vc.is_playing() or vc.is_paused():
-        position = len(get_queue(gid))
-        await interaction.followup.send(embed=embed(
-            "➕ Добавлено в очередь",
-            f"**{meta['title']}**\n{meta['artist']}\nПозиция: {position}",
-        ))
+    # Сначала проверим, есть ли прямая ссылка на трек
+    if "/track/" in query:
+        meta = await resolve_meta(query)
+        if meta is None:
+            await interaction.followup.send("Ничего не найдено.")
+            return
+        add_to_queue(gid, meta["title"], meta["artist"], meta["query"], meta["track_id"])
+        if vc.is_playing() or vc.is_paused():
+            position = len(get_queue(gid))
+            await interaction.followup.send(embed=embed(
+                "➕ Добавлено в очередь",
+                f"**{meta['title']}**\n{meta['artist']}\nПозиция: {position}",
+            ))
+        else:
+            await play_next(guild, announce=False)
+            np = get_now_playing(gid)
+            await interaction.followup.send(
+                embed=now_playing_embed(np if np else meta)
+            )
     else:
-        await play_next(guild, announce=False)
-        np = get_now_playing(gid)
+        results = await search_top(query, limit=5)
+        if not results:
+            await interaction.followup.send("Ничего не найдено.")
+            return
+
+        lines = [
+            f"{i+1}. **{r['title']}** — {r['artist']}"
+            for i, r in enumerate(results)
+        ]
+        view = SearchResultsView(results, gid, interaction.channel, vc)
         await interaction.followup.send(
-            embed=now_playing_embed(np if np else meta)
+            embed=embed("🔍 Выбери трек (5 лучших результатов)", "\n".join(lines)),
+            view=view,
         )
+
 
 
 @tree.command(name="skip", description="Пропустить текущий трек")
@@ -269,6 +422,7 @@ async def pause(interaction: discord.Interaction):
     vc = interaction.guild.voice_client
     if vc and vc.is_playing():
         vc.pause()
+        mark_paused(interaction.guild.id)
         await interaction.response.send_message("⏸ Пауза")
     else:
         await interaction.response.send_message(
@@ -281,6 +435,7 @@ async def resume(interaction: discord.Interaction):
     vc = interaction.guild.voice_client
     if vc and vc.is_paused():
         vc.resume()
+        mark_resumed(interaction.guild.id)
         await interaction.response.send_message("▶ Продолжаю")
     else:
         await interaction.response.send_message(
@@ -332,9 +487,14 @@ async def nowplaying(interaction: discord.Interaction):
     np = get_now_playing(interaction.guild.id)
 
     if vc and (vc.is_playing() or vc.is_paused()) and np:
-        await interaction.response.send_message(embed=now_playing_embed(np))
+        view = TrackControlsView(interaction.guild)
+        await interaction.response.send_message(
+            embed=now_playing_embed(np),
+            view=view,
+        )
     else:
         await interaction.response.send_message("Сейчас ничего не играет.")
+
 
 
 # ----------------------------------------------------------------------------
@@ -562,9 +722,43 @@ async def playlist_rename(
         )
 
 
-# ----------------------------------------------------------------------------
-# Запуск: Discord + (опционально) Telegram в одном цикле
-# ----------------------------------------------------------------------------
+@tree.command(
+    name="import",
+    description="Импортировать плейлист/альбом Яндекса по ссылке"
+)
+async def import_playlist(interaction: discord.Interaction, url: str):
+    await interaction.response.defer()
+
+    if interaction.user.voice is None:
+        await interaction.followup.send("Зайди в голосовой канал.")
+        return
+
+    guild = interaction.guild
+    gid = guild.id
+    text_channels[gid] = interaction.channel
+
+    vc = guild.voice_client
+    if vc is None:
+        vc = await connect_voice(interaction.user.voice.channel)
+
+    tracks = await resolve_playlist(url)
+    if not tracks:
+        await interaction.followup.send("Не удалось загрузить плейлист.")
+        return
+
+    count = 0
+    for track in tracks:
+        add_to_queue(gid, track["title"], track["artist"], track["query"], track.get("track_id"))
+        count += 1
+
+    if not (vc.is_playing() or vc.is_paused()):
+        await play_next(guild, announce=False)
+
+    await interaction.followup.send(embed=embed(
+        "📂 Плейлист загружен",
+        f"Добавлено треков: {count}",
+    ))
+
 
 async def main():
     tasks = [client.start(config.TOKEN)]

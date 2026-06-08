@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import discord
 from discord import app_commands
@@ -33,6 +34,60 @@ listen_sinks = {}
 
 
 # ----------------------------------------------------------------------------
+# Прогресс трека
+# ----------------------------------------------------------------------------
+
+def _elapsed(np):
+    """Сколько секунд проиграно (с учётом паузы). None, если нет данных."""
+    if not np or "started_at" not in np:
+        return None
+    base = np.get("paused_at") or time.time()
+    el = base - np["started_at"]
+    dur = np.get("duration") or 0
+    if dur:
+        el = min(el, dur)
+    return max(0, el)
+
+
+def _fmt_time(sec):
+    sec = int(sec)
+    return f"{sec // 60}:{sec % 60:02d}"
+
+
+def format_progress(np):
+    """Полоса прогресса + время. Пустая строка, если данных нет."""
+    el = _elapsed(np)
+    if el is None:
+        return ""
+    dur = (np or {}).get("duration") or 0
+    if dur <= 0:
+        return _fmt_time(el)
+    length = 12
+    pos = min(int(length * el / dur), length - 1)
+    bar = "▬" * pos + "🔘" + "▬" * (length - pos - 1)
+    return f"{bar} {_fmt_time(el)} / {_fmt_time(dur)}"
+
+
+def mark_paused(gid):
+    """Замораживает прогресс на паузе."""
+    np = get_now_playing(gid)
+    if np and not np.get("paused_at"):
+        np["paused_at"] = time.time()
+        set_now_playing(gid, np)
+
+
+def mark_resumed(gid):
+    """Сдвигает старт на длительность паузы, чтобы прогресс был точным."""
+    np = get_now_playing(gid)
+    if np and np.get("paused_at"):
+        np["started_at"] = np.get("started_at", time.time()) + (
+            time.time() - np["paused_at"]
+        )
+        np["paused_at"] = None
+        set_now_playing(gid, np)
+
+
+# ----------------------------------------------------------------------------
 # Embed-сообщения
 # ----------------------------------------------------------------------------
 
@@ -41,11 +96,11 @@ def embed(title, description="", color=discord.Color.blurple()):
 
 
 def now_playing_embed(track):
-    return embed(
-        "▶ Сейчас играет",
-        f"**{track['title']}**\n{track['artist']}",
-        discord.Color.green(),
-    )
+    desc = f"**{track['title']}**\n{track['artist']}"
+    prog = format_progress(track)
+    if prog:
+        desc += f"\n\n{prog}"
+    return embed("▶ Сейчас играет", desc, discord.Color.green())
 
 
 # ----------------------------------------------------------------------------
@@ -117,8 +172,8 @@ async def play_next(guild, announce=True):
 
         set_now_playing(gid, next_track)
 
-        url = await sources.resolve_url(next_track)
-        if url is None:
+        result = await sources.resolve_url(next_track)
+        if result is None:
             ch = text_channels.get(gid)
             if ch:
                 await ch.send(embed=embed(
@@ -131,6 +186,15 @@ async def play_next(guild, announce=True):
             await play_next(guild, announce=announce)
             return
 
+        url, duration = result
+
+        # обогащаем now_playing данными для прогресс-бара
+        np_entry = dict(next_track)
+        np_entry["duration"] = duration
+        np_entry["started_at"] = time.time()
+        np_entry["paused_at"] = None
+        set_now_playing(gid, np_entry)
+
         source = discord.PCMVolumeTransformer(
             discord.FFmpegPCMAudio(
                 url, executable=config.FFMPEG_PATH, **config.FFMPEG_OPTIONS
@@ -142,6 +206,6 @@ async def play_next(guild, announce=True):
         if announce:
             ch = text_channels.get(gid)
             if ch:
-                await ch.send(embed=now_playing_embed(next_track))
+                await ch.send(embed=now_playing_embed(np_entry))
     except Exception as e:
         print(f"[play_next] {e}")

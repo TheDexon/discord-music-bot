@@ -4,8 +4,11 @@ from core import (
     connect_voice,
     play_next,
     listen_sinks,
+    mark_paused,
+    mark_resumed,
+    format_progress,
 )
-from sources import resolve_meta
+from sources import resolve_meta, search_top, resolve_playlist
 from player import (
     get_queue,
     clear_queue,
@@ -82,6 +85,7 @@ if TG_AVAILABLE and config.TELEGRAM_TOKEN:
     HELP_TEXT = (
         "🎵 Музыка:\n"
         "/play <название|ссылка> — добавить и играть\n"
+        "/search <название> — выбрать из топ-5\n"
         "/skip — пропустить\n"
         "/pause /resume /stop\n"
         "/volume <0-200>\n"
@@ -91,7 +95,8 @@ if TG_AVAILABLE and config.TELEGRAM_TOKEN:
         "/remove <номер> — убрать из очереди\n"
         "/move <откуда> <куда> — переставить\n"
         "/loop off|track|queue\n"
-        "/join /leave\n\n"
+        "/join /leave\n"
+        "/import <ссылка> — загрузить плейлист\n\n"
         "📁 Плейлисты (у каждого свои):\n"
         "/playlists — список\n"
         "/playlist_create <название>\n"
@@ -116,7 +121,13 @@ if TG_AVAILABLE and config.TELEGRAM_TOKEN:
         q = get_queue(guild.id)
         vol = int(get_volume(guild.id) * 100)
         loop = get_loop_mode(guild.id)
-        now = f"{np['title']} — {np['artist']}" if np else "—"
+        if np:
+            now = f"{np['title']} — {np['artist']}"
+            prog = format_progress(np)
+            if prog:
+                now += f"\n{prog}"
+        else:
+            now = "—"
         return (
             "🎛 Панель управления\n\n"
             f"▶ Сейчас: {now}\n"
@@ -245,12 +256,14 @@ if TG_AVAILABLE and config.TELEGRAM_TOKEN:
         if data == "ctl:pause":
             if vc and vc.is_playing():
                 vc.pause()
+                mark_paused(guild.id)
                 await call.answer("⏸ Пауза")
             else:
                 await call.answer("Ничего не играет.")
         elif data == "ctl:resume":
             if vc and vc.is_paused():
                 vc.resume()
+                mark_resumed(guild.id)
                 await call.answer("▶ Продолжаю")
             else:
                 await call.answer("Не на паузе.")
@@ -347,6 +360,7 @@ if TG_AVAILABLE and config.TELEGRAM_TOKEN:
         vc = guild.voice_client if guild else None
         if vc and vc.is_playing():
             vc.pause()
+            mark_paused(guild.id)
             await message.answer("⏸ Пауза")
         else:
             await message.answer("Сейчас ничего не играет.")
@@ -357,6 +371,7 @@ if TG_AVAILABLE and config.TELEGRAM_TOKEN:
         vc = guild.voice_client if guild else None
         if vc and vc.is_paused():
             vc.resume()
+            mark_resumed(guild.id)
             await message.answer("▶ Продолжаю")
         else:
             await message.answer("Музыка не на паузе.")
@@ -406,7 +421,11 @@ if TG_AVAILABLE and config.TELEGRAM_TOKEN:
         np = get_now_playing(guild.id) if guild else None
         vc = guild.voice_client if guild else None
         if vc and (vc.is_playing() or vc.is_paused()) and np:
-            await message.answer(f"🎵 {np['title']} — {np['artist']}")
+            line = f"🎵 {np['title']} — {np['artist']}"
+            prog = format_progress(np)
+            if prog:
+                line += f"\n{prog}"
+            await message.answer(line)
         else:
             await message.answer("Сейчас ничего не играет.")
 
@@ -631,6 +650,89 @@ if TG_AVAILABLE and config.TELEGRAM_TOKEN:
             await message.answer(f"✏ '{old}' → '{new}'")
         else:
             await message.answer("Не удалось переименовать (нет такого или имя занято).")
+
+    @dp.message(Command("search"))
+    async def tg_search(message: Message, command: CommandObject):
+        query = (command.args or "").strip()
+        if not query:
+            await message.answer("Использование: /search <название трека>")
+            return
+        results = await search_top(query, limit=5)
+        if not results:
+            await message.answer("Ничего не найдено.")
+            return
+        guild = tg_guild()
+        if guild is None:
+            await message.answer("Сервер недоступен.")
+            return
+        text = "🔍 Выбери трек:\n\n"
+        for i, r in enumerate(results, 1):
+            text += f"{i}. {r['title']} — {r['artist']}\n"
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=str(i), callback_data=f"search:{guild.id}:{i-1}")]
+            for i in range(1, len(results) + 1)
+        ])
+        for i, r in enumerate(results):
+            if not hasattr(tg_search, "_results"):
+                tg_search._results = {}
+            tg_search._results[f"{guild.id}:{i}"] = r
+        await message.answer(text, reply_markup=kb)
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("search:"))
+    async def tg_search_select(call: CallbackQuery):
+        parts = call.data.split(":")
+        if len(parts) != 3:
+            await call.answer()
+            return
+        guild_id = int(parts[1])
+        idx = int(parts[2])
+        key = f"{guild_id}:{idx}"
+        if not hasattr(tg_search, "_results") or key not in tg_search._results:
+            await call.answer("Результат истёк. Попробуй ещё раз.", show_alert=True)
+            return
+        meta = tg_search._results[key]
+        guild = client.get_guild(guild_id)
+        if guild is None:
+            await call.answer("Сервер недоступен.", show_alert=True)
+            return
+        vc = await tg_ensure_voice(guild)
+        if vc is None:
+            await call.answer("Не удалось подключиться.", show_alert=True)
+            return
+        add_to_queue(guild.id, meta["title"], meta["artist"], meta["query"], meta["track_id"])
+        if vc.is_playing() or vc.is_paused():
+            pos = len(get_queue(guild.id))
+            await call.answer(f"➕ #{pos}: {meta['title']}")
+        else:
+            await play_next(guild, announce=False)
+            await call.answer(f"▶ Играю: {meta['title']}")
+
+    @dp.message(Command("import"))
+    async def tg_import(message: Message, command: CommandObject):
+        url = (command.args or "").strip()
+        if not url:
+            await message.answer("Использование: /import <ссылка на плейлист>")
+            return
+        guild = tg_guild()
+        if guild is None:
+            await message.answer("Сервер недоступен.")
+            return
+        vc = await tg_ensure_voice(guild)
+        if vc is None:
+            await message.answer("Не удалось подключиться к голосовому каналу.")
+            return
+        await message.answer("⏳ Загружаю плейлист...")
+        tracks = await resolve_playlist(url)
+        if not tracks:
+            await message.answer("Не удалось загрузить плейлист.")
+            return
+        count = 0
+        for track in tracks:
+            add_to_queue(guild.id, track["title"], track["artist"], track["query"], track.get("track_id"))
+            count += 1
+        if not (vc.is_playing() or vc.is_paused()):
+            await play_next(guild, announce=False)
+        await message.answer(f"📂 Загружено {count} треков")
 
     # --- Любой обычный текст = добавить трек и играть ---
 
