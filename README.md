@@ -21,9 +21,14 @@
 ```text
 DiscordBot/
 
-├── bot.py
-├── player.py
-├── playlists.py
+├── bot.py            # точка входа: Discord-команды, события, запуск
+├── core.py           # клиент, общее состояние, плеер (play_next), кик
+├── config.py         # переменные .env и константы
+├── sources.py        # поиск/резолвинг Яндекс Музыки
+├── telegram_bot.py   # Telegram-управление (панель + команды)
+├── voice_listen.py   # голосовое прослушивание (опц., не работает из-за DAVE)
+├── player.py         # очередь и настройки сервера
+├── playlists.py      # пользовательские плейлисты
 
 ├── .env.example
 ├── requirements.txt
@@ -106,6 +111,8 @@ VOSK_MODEL_PATH=model    # путь к модели Vosk (только для /l
 * `/queue` — текущий трек и очередь.
 * `/clear` — очистить очередь.
 * `/shuffle` — перемешать.
+* `/remove <номер>` — удалить трек из очереди.
+* `/move <откуда> <куда>` — переставить трек в очереди.
 * `/loop off|track|queue` — режим повтора.
 
 ## Плейлисты
@@ -152,7 +159,7 @@ VOSK_MODEL_PATH=model    # путь к модели Vosk (только для /l
 
 ## Команды (тоже работают)
 
-Музыка: `/play <название|ссылка>`, `/skip`, `/pause`, `/resume`, `/stop`, `/volume <0-200>`, `/queue`, `/np`, `/clear`, `/shuffle`, `/loop off|track|queue`, `/join`, `/leave`.
+Музыка: `/play <название|ссылка>`, `/skip`, `/pause`, `/resume`, `/stop`, `/volume <0-200>`, `/queue`, `/np`, `/clear`, `/shuffle`, `/remove <номер>`, `/move <откуда> <куда>`, `/loop off|track|queue`, `/join`, `/leave`.
 
 Плейлисты: `/playlists`, `/playlist_create <название>`, `/playlist_show <название>`, `/playlist_delete <название>`, `/playlist_add <название> | <трек|ссылка>`, `/playlist_remove <название> <номер>`, `/playlist_play <название>`, `/playlist_rename <старое> | <новое>`.
 
@@ -232,7 +239,6 @@ VOSK_MODEL_PATH=model    # путь к модели Vosk (только для /l
 
 * [ ] Голосовое распознавание (`/listen`, `/stoplisten`) — **недоступно**: с марта 2026 Discord включил обязательное сквозное шифрование голоса (DAVE), и бот не может расшифровать аудио участников. Код оставлен, но фича упирается в шифрование.
 * [ ] Поддержка ВК Музыки — не реализована.
-* [ ] `/remove` для удаления трека из очереди по номеру — не реализована (функция в коде есть).
 
 ---
 

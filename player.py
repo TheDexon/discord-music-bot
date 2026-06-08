@@ -89,6 +89,21 @@ def remove_track(guild_id, index):
     return True
 
 
+def move_track(guild_id, from_index, to_index):
+    data = ensure_guild(guild_id)
+    guild_id = str(guild_id)
+
+    queue = data[guild_id]["queue"]
+    n = len(queue)
+    if from_index < 0 or from_index >= n or to_index < 0 or to_index >= n:
+        return False
+
+    track = queue.pop(from_index)
+    queue.insert(to_index, track)
+    save_queue(data)
+    return True
+
+
 def shuffle_queue(guild_id):
     data = ensure_guild(guild_id)
     random.shuffle(data[str(guild_id)]["queue"])

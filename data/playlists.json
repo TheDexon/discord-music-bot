@@ -1,0 +1,36 @@
+{
+    "571648183588093955": {
+        "nikita gay": [],
+        "danil huesos": [],
+        "test": [
+            {
+                "title": "Minecraft",
+                "artist": "C418",
+                "query": "Minecraft c418",
+                "track_id": "146310620"
+            },
+            {
+                "title": "Blinding Lights",
+                "artist": "The Weeknd",
+                "query": "https://music.yandex.ru/album/29644890/track/60292250?utm_source=web&utm_medium=copy_link",
+                "track_id": "60292250"
+            }
+        ]
+    },
+    "tg:861337051": {
+        "гойда_тест": [
+            {
+                "title": "Minecraft",
+                "artist": "C418",
+                "query": "minecraft",
+                "track_id": "146310620"
+            },
+            {
+                "title": "1 Класс",
+                "artist": "VIBA",
+                "query": "1 класс 1 класс",
+                "track_id": "130533411"
+            }
+        ]
+    }
+}
